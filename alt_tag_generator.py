@@ -44,8 +44,9 @@ processor = Blip2Processor.from_pretrained(MODEL_DIR)
 model = Blip2ForConditionalGeneration.from_pretrained(
     MODEL_DIR,
     torch_dtype=dtype,
-    device_map="auto"
-)
+    device_map=None  # instead of "auto"
+).to("cuda" if torch.cuda.is_available() else "cpu")
+
 print("✅ Model loaded successfully!\n")
 
 # --------------------------
