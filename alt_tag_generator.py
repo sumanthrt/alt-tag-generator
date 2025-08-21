@@ -144,13 +144,13 @@ html_lines = [
     "    .content { margin-left: 240px; padding: 20px; flex-grow: 1; }",
     "    h1 { text-align: center; color: #2c3e50; }",
     "    h2 { margin-top: 40px; color: #34495e; border-bottom: 2px solid #3498db; padding-bottom: 5px; }",
-    "    table { border-collapse: collapse; width: 100%; margin-bottom: 40px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }",
+    "    table { border-collapse: collapse; width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }",
     "    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: middle; }",
     "    thead th { background-color: #3498db; color: white; position: sticky; top: 0; z-index: 10; }",
     "    img { width: 250px; height: 180px; object-fit: cover; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }",
     "    button { margin-top: 5px; padding: 4px 8px; font-size: 0.85rem; background: #3498db; color: white; border: none; border-radius: 3px; cursor: pointer; }",
     "    button:hover { background: #2980b9; }",
-    "    td:nth-child(1) { width: 20%;}",
+    "    td:nth-child(1) { width: 20%; text-align: center; }",
     "    td:nth-child(2) { width: 40%; }",
     "    td:nth-child(3) { width: 40%; }",
     "  </style>",
@@ -178,16 +178,19 @@ for folder, results in results_by_folder.items():
 
     for img_name, rel_path, alt_text in results:
         escaped_path = html.escape(rel_path)
+        abs_path = os.path.abspath(os.path.join(image_folder_path, rel_path))
+        escaped_abs_path = html.escape(abs_path)
         escaped_alt = html.escape(alt_text)
         html_lines.append("  <tr>")
         html_lines.append(f"    <td><img src='{escaped_path}' alt='{escaped_alt}'></td>")
         html_lines.append(
             f"    <td>{escaped_path}<br>"
             f"<button onclick=\"navigator.clipboard.writeText('{img_name}')\">Copy Name</button> "
-            f"<button onclick=\"navigator.clipboard.writeText('{escaped_path}')\">Copy Path</button></td>"
+            f"<button onclick=\"navigator.clipboard.writeText('{escaped_abs_path}')\">Copy Path</button></td>"
         )
         html_lines.append(f"    <td>{escaped_alt}<br><button onclick=\"navigator.clipboard.writeText('{escaped_alt}')\">Copy Alt</button></td>")
         html_lines.append("  </tr>")
+
 
     html_lines.append("</tbody></table>")
 
