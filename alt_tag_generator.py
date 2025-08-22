@@ -9,12 +9,17 @@ from datetime import datetime
 from tqdm import tqdm
 import html
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --------------------------
-# CONFIG
+# CONFIG (tune these)
 # --------------------------
 MODEL_DIR = "./blip2-opt-2.7b"
-MAX_NEW_TOKENS = 100  # adjust if you want longer captions
+MAX_NEW_TOKENS = 40
+BATCH_SIZE = 2                 # try 2–4 if RAM allows
+NUM_WORKERS = 4                # threads for PIL load/resize
+TARGET_THUMB = (480, 480)      # quick pre-resize; HF processor still resizes appropriately
+SET_TORCH_THREADS = True
 
 # --------------------------
 # USER INPUT
@@ -27,27 +32,27 @@ image_folder_path = Path(image_folder)
 
 if not image_folder_path.exists() or not image_folder_path.is_dir():
     print("Invalid image folder path.")
-    exit(1)
+    raise SystemExit(1)
 
-# Place report inside the image folder itself
 OUTPUT_HTML = image_folder_path / f"alt_tags_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
 
 # --------------------------
-# DEVICE + DTYPE SETUP
+# DEVICE + DTYPE (CPU only)
 # --------------------------
-if torch.backends.mps.is_available():
-    device = "mps"
-    dtype = torch.float16
-elif torch.cuda.is_available():
-    device = "cuda"
-    dtype = torch.float16
-    # CUDA perf knobs
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-else:
-    device = "cpu"
-    dtype = torch.float32
+if torch.cuda.is_available() or torch.backends.mps.is_available():
+    print("⚠️ Detected CUDA/MPS, but proceeding with CPU-only as requested.")
+device = "cpu"
+dtype = torch.float32
+
+if SET_TORCH_THREADS:
+    try:
+        cores = os.cpu_count() or 4
+        use_threads = max(1, cores - (1 if cores >= 6 else 0))
+        torch.set_num_threads(use_threads)
+        torch.set_num_interop_threads(max(1, use_threads // 2))
+        print(f"🧵 PyTorch threads set: {use_threads} (interop {max(1, use_threads // 2)})")
+    except Exception as e:
+        print(f"Could not set PyTorch threads: {e}")
 
 # --------------------------
 # LOAD MODEL
@@ -63,7 +68,7 @@ model.eval()
 print("Model loaded successfully!\n")
 
 # --------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # --------------------------
 def sanitize_id(name):
     return re.sub(r'[^a-zA-Z0-9_-]', '_', name)
@@ -78,18 +83,23 @@ def sentence_case(text):
 def esc_attr(text: str) -> str:
     return html.escape(text, quote=True)
 
+def load_and_resize(path: Path) -> Image.Image:
+    img = Image.open(path).convert("RGB")
+    img.thumbnail(TARGET_THUMB, resample=Image.BILINEAR)
+    return img
+
 # --------------------------
-# GATHER IMAGE FILES RECURSIVELY
+# GATHER IMAGE FILES
 # --------------------------
 image_files = [f for f in sorted(image_folder_path.rglob("*"))
                if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]]
 
 if not image_files:
     print("No images found in the folder or subfolders.")
-    exit(1)
+    raise SystemExit(1)
 
 # --------------------------
-# GROUP FILES BY SUBFOLDER
+# GROUP BY SUBFOLDER
 # --------------------------
 images_by_folder = {}
 for f in image_files:
@@ -97,54 +107,91 @@ for f in image_files:
     images_by_folder.setdefault(str(rel_folder), []).append(f)
 
 # --------------------------
-# GENERATE ALT TAGS
+# PRELOAD & RESIZE (PARALLEL)
+# --------------------------
+print("Preloading & resizing images...")
+preloaded = {}
+start_pre = time.time()
+with ThreadPoolExecutor(max_workers=NUM_WORKERS) as ex:
+    fut_to_path = {ex.submit(load_and_resize, p): p for p in image_files}
+    for fut in tqdm(as_completed(fut_to_path),
+                    total=len(fut_to_path),
+                    desc="Preprocess",
+                    leave=True,
+                    dynamic_ncols=True):
+        p = fut_to_path[fut]
+        try:
+            preloaded[p] = fut.result()
+        except Exception as e:
+            tqdm.write(f"⚠️ Skipping {p}: {e}")
+end_pre = time.time()
+print(f"Preprocess time: {end_pre - start_pre:.2f}s\n")
+
+# --------------------------
+# GENERATE ALT TAGS (BATCHED)
 # --------------------------
 results_by_folder = {}
 start_time = time.time()
 
+# Back to the older autocast API (may print a FutureWarning; safe to ignore)
+supports_bf16 = True  # we'll try bf16 autocast; if CPU doesn't benefit, PyTorch will still run correctly
+autocast_ctx = (torch.cpu.amp.autocast(dtype=torch.bfloat16)
+                if supports_bf16 else torch.cpu.amp.autocast(enabled=False))
+
 with torch.inference_mode():
     for folder, files in images_by_folder.items():
+        folder_title = folder if folder != "." else "(root folder)"
+        tqdm.write(f"Processing folder: {folder_title}")
+
         results = []
-        print(f"Processing folder: {folder if folder != '.' else '(root folder)'}")
-        for img_file in tqdm(files, desc=f"Images in {folder}", leave=False):
-            img_start = time.time()
+        num_batches = (len(files) + BATCH_SIZE - 1) // BATCH_SIZE
+        with tqdm(total=num_batches,
+                  desc=f"Images in {folder}",
+                  leave=True,
+                  dynamic_ncols=True) as pbar:
+            for bstart in range(0, len(files), BATCH_SIZE):
+                batch_paths = files[bstart:bstart + BATCH_SIZE]
+                pil_batch = [preloaded[p] for p in batch_paths if p in preloaded]
+                if not pil_batch:
+                    pbar.update(1)
+                    continue
 
-            # Open and resize image for faster processing
-            image = Image.open(img_file).convert("RGB")
-            image.thumbnail((480, 480), resample=Image.BILINEAR)
+                inputs = processor(images=pil_batch, return_tensors="pt")
+                # channels_last can help oneDNN on CPU
+                pixel_values = inputs["pixel_values"].to(device)
+                pixel_values = pixel_values.to(memory_format=torch.channels_last).contiguous()
+                inputs["pixel_values"] = pixel_values
 
-            # Prepare inputs on device
-            inputs = processor(images=image, return_tensors="pt")
-            if device == "cuda":
-                inputs = {k: v.to(device, non_blocking=True) for k, v in inputs.items()}
-            else:
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                t0 = time.time()
+                with autocast_ctx:
+                    out = model.generate(
+                        **inputs,
+                        max_new_tokens=MAX_NEW_TOKENS,
+                        use_cache=True
+                    )
+                t1 = time.time()
 
-            # Generation (AMP for CUDA)
-            if device == "cuda":
-                with torch.autocast("cuda", dtype=torch.float16):
-                    out = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
-            else:
-                out = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+                # Decode per item
+                for j, p in enumerate(batch_paths):
+                    try:
+                        caption = processor.decode(out[j], skip_special_tokens=True).strip()
+                    except Exception:
+                        caption = processor.decode(out[0], skip_special_tokens=True).strip()
 
-            caption = processor.decode(out[0], skip_special_tokens=True)
-            caption = sentence_case(caption.strip())
+                    caption = sentence_case(caption)
+                    alt_text = caption if is_stock_image(p.name) else f"{caption}, {hotel_name}, {hotel_location}"
+                    rel_path = os.path.relpath(p, image_folder_path)
+                    results.append((p.name, rel_path, alt_text))
 
-            if is_stock_image(img_file.name):
-                alt_text = caption
-            else:
-                alt_text = f"{caption}, {hotel_name}, {hotel_location}"
-
-            rel_path = os.path.relpath(img_file, image_folder_path)
-            results.append((img_file.name, rel_path, alt_text))
-
-            img_end = time.time()
-            print(f"{img_file.name} processed in {img_end - img_start:.2f} seconds")
+                tqdm.write(f"[Batch {bstart//BATCH_SIZE + 1}/{num_batches}] "
+                           f"{', '.join(bp.name for bp in batch_paths)} in {t1 - t0:.2f}s")
+                pbar.update(1)
 
         results_by_folder[folder] = results
 
 total_time = time.time() - start_time
-avg_time = total_time / len(image_files)
+num_imgs = sum(len(v) for v in results_by_folder.values())
+avg_time = total_time / max(1, num_imgs)
 
 # --------------------------
 # CREATE HTML REPORT
@@ -190,7 +237,6 @@ html_lines = [
     "  <h2>Table of Contents</h2>"
 ]
 
-# Sidebar links
 for folder in results_by_folder.keys():
     folder_title = folder if folder != "." else "(root folder)"
     html_lines.append(f"  <a href='#{sanitize_id(folder_title)}'>{html.escape(folder_title)}</a>")
@@ -198,7 +244,6 @@ for folder in results_by_folder.keys():
 html_lines.append("</div><div class='content' id='content'>")
 html_lines.append(f"<h1>Alt Tags for {html.escape(hotel_name)}, {html.escape(hotel_location)}</h1>")
 
-# Tables
 for folder, results in results_by_folder.items():
     folder_title = folder if folder != "." else "(root folder)"
     html_lines.append(f"<h2 id='{sanitize_id(folder_title)}'>Folder: {html.escape(folder_title)}</h2>")
@@ -208,8 +253,6 @@ for folder, results in results_by_folder.items():
     for img_name, rel_path, alt_text in results:
         escaped_path = html.escape(rel_path)
         escaped_alt = html.escape(alt_text)
-
-        # For attributes, escape quotes too
         name_attr = esc_attr(img_name)
         alt_attr  = esc_attr(alt_text)
         path_attr = esc_attr(rel_path)
@@ -230,12 +273,11 @@ for folder, results in results_by_folder.items():
 
     html_lines.append("</tbody></table>")
 
-# Stats
-html_lines.append(f"<p><strong>Total Time:</strong> {total_time:.2f} seconds</p>")
+html_lines.append(f"<p><strong>Preprocess Time:</strong> {end_pre - start_pre:.2f} seconds</p>")
+html_lines.append(f"<p><strong>Total Inference Time:</strong> {total_time:.2f} seconds</p>")
 html_lines.append(f"<p><strong>Average Time per Image:</strong> {avg_time:.2f} seconds</p>")
 html_lines.append("</div></div>")
 
-# JavaScript for toggle (sticky, with a11y)
 html_lines.append("""
 <script>
   const toggleBtn = document.getElementById('toggleBtn');
@@ -255,7 +297,6 @@ html_lines.append("""
     updateAria();
   });
 
-  // Keyboard shortcut: press "s" to toggle sidebar (ignore when typing)
   document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 's' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const t = (e.target.tagName || '').toLowerCase();
@@ -268,7 +309,6 @@ html_lines.append("""
 </script>
 """)
 
-# Unified copy handler for Name / Path / ALT (with "Copied!" feedback)
 html_lines.append("""
 <script>
   document.addEventListener('click', async (e) => {
@@ -277,18 +317,16 @@ html_lines.append("""
 
     let toCopy = btn.getAttribute('data-copy') || '';
 
-    // If it's the Copy Path button, resolve relative -> absolute, OS-native path
     if (btn.classList.contains('copy-path')) {
       const rel = btn.getAttribute('data-rel') || '';
       const reportDir = new URL('.', window.location.href);
       const absURL = new URL(rel, reportDir);
-
-      toCopy = absURL.href; // fallback to file URL
+      toCopy = absURL.href;
       try {
         let p = decodeURIComponent(absURL.pathname);
         const isWindows = navigator.platform.toLowerCase().startsWith('win');
         if (isWindows) {
-          if (p.startsWith('/')) p = p.slice(1); // drop leading slash on Windows
+          if (p.startsWith('/')) p = p.slice(1);
           p = p.replace(/\\//g, '\\\\');
         }
         toCopy = p;
@@ -310,17 +348,14 @@ html_lines.append("""
 
 html_lines.append("</body></html>")
 
-# Save report
 with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
     f.write("\n".join(html_lines))
 
 print(f"All done! Output saved to {OUTPUT_HTML}")
-print(f"Total time: {total_time:.2f} seconds")
+print(f"Preprocess time: {end_pre - start_pre:.2f} seconds")
+print(f"Total inference time: {total_time:.2f} seconds")
 print(f"Average time per image: {avg_time:.2f} seconds")
 
-# --------------------------
-# AUTO-OPEN IN BROWSER
-# --------------------------
 try:
     webbrowser.open(f"file://{OUTPUT_HTML.resolve()}")
 except Exception as e:
