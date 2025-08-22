@@ -1,28 +1,27 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-MODEL_DIR="./blip2-opt-2.7b"
+echo "==========================="
+echo "Setting up environment..."
+echo "==========================="
 
-echo "🟢 Setting up Alt Tag Generator..."
-
-# Check if BLIP2 model folder exists
-if [ ! -d "$MODEL_DIR" ]; then
-    echo "⚠️ BLIP2 model folder not found. Downloading model locally..."
-    python3 - <<END
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
-MODEL_DIR = "$MODEL_DIR"
-print("Downloading BLIP2 processor...")
-Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b", cache_dir=MODEL_DIR)
-print("Downloading BLIP2 model...")
-Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b", cache_dir=MODEL_DIR)
-print("✅ Model downloaded successfully!")
-END
-else
-    echo "✅ BLIP2 model folder already exists."
+# Create venv if missing (use .venv on Unix)
+if [ ! -d ".venv" ]; then
+  python3 -m venv .venv
 fi
 
-# Install Python dependencies including accelerate
-echo "Installing dependencies..."
-python3 -m pip install --upgrade pip
-python3 -m pip install torch transformers Pillow tqdm accelerate
+# Activate venv
+# shellcheck disable=SC1091
+source .venv/bin/activate
 
-echo "✅ Setup complete. You can now run the generator using ./run.sh"
+echo "Upgrading pip..."
+python -m pip install --upgrade pip
+
+# On macOS, install default PyTorch wheel (CPU + Apple Silicon MPS supported)
+echo "Installing packages..."
+pip install torch transformers pillow tqdm
+
+echo "==========================="
+echo "Setup complete!"
+echo "==========================="
+echo "To activate later: source .venv/bin/activate"
