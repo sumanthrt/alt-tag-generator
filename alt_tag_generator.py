@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import torch
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
@@ -10,16 +11,23 @@ from tqdm import tqdm
 import html
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 
 # --------------------------
 # CONFIG (tune these)
 # --------------------------
 MODEL_DIR = "./blip2-opt-2.7b"
 MAX_NEW_TOKENS = 40
-BATCH_SIZE = 2                 # try 2–4 if RAM allows
-NUM_WORKERS = 4                # threads for PIL load/resize
-TARGET_THUMB = (480, 480)      # quick pre-resize; HF processor still resizes appropriately
-SET_TORCH_THREADS = True
+
+# Keep CPU/Windows behavior identical to before
+BATCH_SIZE_CPU = 2            # CPU batch size (Windows path unchanged)
+NUM_WORKERS = 4               # threads for PIL load/resize
+TARGET_THUMB = (480, 480)     # quick pre-resize; HF processor still resizes appropriately
+SET_TORCH_THREADS = True      # CPU-only tuning
+
+# macOS (Apple Silicon) tunables
+USE_MPS_IF_AVAILABLE = True
+BATCH_SIZE_MAC = 2            # try 3–4 if VRAM allows; start with 2 for safety
 
 # --------------------------
 # USER INPUT
@@ -37,14 +45,27 @@ if not image_folder_path.exists() or not image_folder_path.is_dir():
 OUTPUT_HTML = image_folder_path / f"alt_tags_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
 
 # --------------------------
-# DEVICE + DTYPE (CPU only)
+# DEVICE SELECTION
 # --------------------------
-if torch.cuda.is_available() or torch.backends.mps.is_available():
-    print("⚠️ Detected CUDA/MPS, but proceeding with CPU-only as requested.")
-device = "cpu"
-dtype = torch.float32
+is_mac = (sys.platform == "darwin")
+use_mps = (is_mac and USE_MPS_IF_AVAILABLE and torch.backends.mps.is_available())
 
-if SET_TORCH_THREADS:
+if use_mps:
+    device = "mps"
+    dtype = torch.float16          # fp16 weights on MPS for speed
+    eff_batch_size = BATCH_SIZE_MAC
+    print("🚀 Using Apple Silicon MPS (fp16)")
+else:
+    # Preserve CPU-only behavior (even if CUDA is present)
+    if torch.cuda.is_available() or torch.backends.mps.is_available():
+        print("⚠️ Accelerators detected, but using CPU path for parity.")
+    device = "cpu"
+    dtype = torch.float32
+    eff_batch_size = BATCH_SIZE_CPU
+    print("🧠 Using CPU")
+
+# CPU thread tuning (unchanged)
+if device == "cpu" and SET_TORCH_THREADS:
     try:
         cores = os.cpu_count() or 4
         use_threads = max(1, cores - (1 if cores >= 6 else 0))
@@ -61,7 +82,7 @@ print("Loading BLIP2 (OPT-2.7B) from local folder...")
 processor = Blip2Processor.from_pretrained(MODEL_DIR)
 model = Blip2ForConditionalGeneration.from_pretrained(
     MODEL_DIR,
-    torch_dtype=dtype,
+    torch_dtype=dtype,   # fp16 on MPS, fp32 on CPU
     device_map=None
 ).to(device)
 model.eval()
@@ -133,10 +154,13 @@ print(f"Preprocess time: {end_pre - start_pre:.2f}s\n")
 results_by_folder = {}
 start_time = time.time()
 
-# Back to the older autocast API (may print a FutureWarning; safe to ignore)
-supports_bf16 = True  # we'll try bf16 autocast; if CPU doesn't benefit, PyTorch will still run correctly
-autocast_ctx = (torch.cpu.amp.autocast(dtype=torch.bfloat16)
-                if supports_bf16 else torch.cpu.amp.autocast(enabled=False))
+# Autocast:
+# - CPU: keep the older API for parity with your fast path
+# - MPS: disable autocast (already running fp16 end-to-end)
+if device == "cpu":
+    autocast_ctx = torch.cpu.amp.autocast(dtype=torch.bfloat16)  # may show FutureWarning; safe
+else:
+    autocast_ctx = nullcontext()  # MPS path
 
 with torch.inference_mode():
     for folder, files in images_by_folder.items():
@@ -144,22 +168,28 @@ with torch.inference_mode():
         tqdm.write(f"Processing folder: {folder_title}")
 
         results = []
-        num_batches = (len(files) + BATCH_SIZE - 1) // BATCH_SIZE
+        num_batches = (len(files) + eff_batch_size - 1) // eff_batch_size
         with tqdm(total=num_batches,
                   desc=f"Images in {folder}",
                   leave=True,
                   dynamic_ncols=True) as pbar:
-            for bstart in range(0, len(files), BATCH_SIZE):
-                batch_paths = files[bstart:bstart + BATCH_SIZE]
+            for bstart in range(0, len(files), eff_batch_size):
+                batch_paths = files[bstart:bstart + eff_batch_size]
                 pil_batch = [preloaded[p] for p in batch_paths if p in preloaded]
                 if not pil_batch:
                     pbar.update(1)
                     continue
 
                 inputs = processor(images=pil_batch, return_tensors="pt")
-                # channels_last can help oneDNN on CPU
-                pixel_values = inputs["pixel_values"].to(device)
-                pixel_values = pixel_values.to(memory_format=torch.channels_last).contiguous()
+
+                # CPU-only optimization: channels_last helps oneDNN
+                if device == "cpu":
+                    pixel_values = inputs["pixel_values"].to(device)
+                    pixel_values = pixel_values.to(memory_format=torch.channels_last).contiguous()
+                else:
+                    # MPS: move as fp16 to avoid casts
+                    pixel_values = inputs["pixel_values"].to(device, dtype=torch.float16)
+
                 inputs["pixel_values"] = pixel_values
 
                 t0 = time.time()
@@ -183,9 +213,16 @@ with torch.inference_mode():
                     rel_path = os.path.relpath(p, image_folder_path)
                     results.append((p.name, rel_path, alt_text))
 
-                tqdm.write(f"[Batch {bstart//BATCH_SIZE + 1}/{num_batches}] "
+                tqdm.write(f"[Batch {bstart//eff_batch_size + 1}/{num_batches}] "
                            f"{', '.join(bp.name for bp in batch_paths)} in {t1 - t0:.2f}s")
                 pbar.update(1)
+
+                # Optional: trim MPS cache occasionally on long runs
+                if device == "mps" and ((bstart // eff_batch_size) % 8 == 0):
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
 
         results_by_folder[folder] = results
 
@@ -196,12 +233,14 @@ avg_time = total_time / max(1, num_imgs)
 # --------------------------
 # CREATE HTML REPORT
 # --------------------------
+def esc(s): return html.escape(s)
+
 html_lines = [
     "<!DOCTYPE html>",
     "<html lang='en'>",
     "<head>",
     "  <meta charset='UTF-8'>",
-    f"  <title>Alt Tags for {esc_attr(hotel_name)}</title>",
+    f"  <title>Alt Tags for {esc(hotel_name)}</title>",
     "  <style>",
     "    :root { --sidebar-w: 220px; --gap: 20px; }",
     "    body { font-family: Arial, sans-serif; margin: 0; background: #f9fafc; color: #333; }",
@@ -239,20 +278,20 @@ html_lines = [
 
 for folder in results_by_folder.keys():
     folder_title = folder if folder != "." else "(root folder)"
-    html_lines.append(f"  <a href='#{sanitize_id(folder_title)}'>{html.escape(folder_title)}</a>")
+    html_lines.append(f"  <a href='#{sanitize_id(folder_title)}'>{esc(folder_title)}</a>")
 
 html_lines.append("</div><div class='content' id='content'>")
-html_lines.append(f"<h1>Alt Tags for {html.escape(hotel_name)}, {html.escape(hotel_location)}</h1>")
+html_lines.append(f"<h1>Alt Tags for {esc(hotel_name)}, {esc(hotel_location)}</h1>")
 
 for folder, results in results_by_folder.items():
     folder_title = folder if folder != "." else "(root folder)"
-    html_lines.append(f"<h2 id='{sanitize_id(folder_title)}'>Folder: {html.escape(folder_title)}</h2>")
+    html_lines.append(f"<h2 id='{sanitize_id(folder_title)}'>Folder: {esc(folder_title)}</h2>")
     html_lines.append("<table>")
     html_lines.append("  <thead><tr><th>Image</th><th>File Name</th><th>ALT Text</th></tr></thead><tbody>")
 
     for img_name, rel_path, alt_text in results:
-        escaped_path = html.escape(rel_path)
-        escaped_alt = html.escape(alt_text)
+        escaped_path = esc(rel_path)
+        escaped_alt = esc(alt_text)
         name_attr = esc_attr(img_name)
         alt_attr  = esc_attr(alt_text)
         path_attr = esc_attr(rel_path)
@@ -360,3 +399,4 @@ try:
     webbrowser.open(f"file://{OUTPUT_HTML.resolve()}")
 except Exception as e:
     print(f"Could not open browser automatically: {e}")
+Ma
