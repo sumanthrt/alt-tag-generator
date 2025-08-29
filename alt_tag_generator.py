@@ -17,7 +17,7 @@ from contextlib import nullcontext
 # CONFIG (tune these)
 # --------------------------
 MODEL_DIR = "./blip2-opt-2.7b"
-MAX_NEW_TOKENS = 40
+MAX_NEW_TOKENS = 4000
 
 # Keep CPU/Windows behavior identical to before
 BATCH_SIZE_CPU = 2            # CPU batch size (Windows path unchanged)
@@ -242,26 +242,26 @@ html_lines = [
     "  <meta charset='UTF-8'>",
     f"  <title>Alt Tags for {esc(hotel_name)}</title>",
     "  <style>",
-    "    :root { --sidebar-w: 220px; --gap: 20px; }",
+    "    :root { --sidebar-w: 220px; --gap: 20px; --primary-color: #27ae60; --secondary-color): #145a32; --tertiary-color: #1e8449; }",
     "    body { font-family: Arial, sans-serif; margin: 0; background: #f9fafc; color: #333; }",
     "    .container { display: flex; }",
-    "    .sidebar { position: fixed; top: 0; left: 0; width: var(--sidebar-w); height: 100%; background: #145a32; color: white; overflow-y: auto; padding: 20px; box-sizing: border-box; transition: transform 0.3s ease; }",
+    "    .sidebar { position: fixed; top: 0; left: 0; width: var(--sidebar-w); height: 100%; background: var(--secondary-color); color: white; overflow-y: auto; padding: 20px; box-sizing: border-box; transition: transform 0.3s ease; }",
     "    .sidebar.collapsed { transform: translateX(-100%); }",
     "    .sidebar h2 { font-size: 18px; margin-top: 0; color: #eafaf1; }",
     "    .sidebar a { display: block; color: #eafaf1; text-decoration: none; margin: 8px 0; font-size: 14px; }",
     "    .sidebar a:hover { text-decoration: underline; }",
     "    .content { margin-left: calc(var(--sidebar-w) + var(--gap)); padding: 20px; flex-grow: 1; transition: margin-left 0.3s ease; }",
     "    .content.fullwidth { margin-left: var(--gap); }",
-    "    h1 { text-align: center; color: #145a32; }",
-    "    h2 { margin-top: 40px; color: #1e8449; border-bottom: 2px solid #27ae60; padding-bottom: 5px; }",
+    "    h1 { text-align: center; color: var(--secondary-color); }",
+    "    h2 { margin-top: 40px; color: var(--tertiary-color); border-bottom: 2px solid var(--primary-color); padding-bottom: 5px; }",
     "    table { border-collapse: collapse; width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }",
     "    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: middle; }",
-    "    thead th { background-color: #27ae60; color: white; position: sticky; top: 0; z-index: 10; }",
+    "    thead th { background-color: var(--primary-color); color: white; position: sticky; top: 0; z-index: 10; }",
     "    img { width: 250px; height: 180px; object-fit: cover; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }",
-    "    button { margin-top: 5px; padding: 4px 8px; font-size: 0.85rem; background: #27ae60; color: white; border: none; border-radius: 3px; cursor: pointer; min-width: 120px;}",
-    "    button:hover { background: #1e8449; }",
-    "    #toggleBtn { position: fixed; top: 45px; left: 12px; z-index: 1100; background: #27ae60; color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }",
-    "    #toggleBtn:hover { background: #1e8449; }",
+    "    button { margin-top: 5px; padding: 4px 8px; font-size: 0.85rem; background: var(--primary-color); color: white; border: none; border-radius: 3px; cursor: pointer; min-width: 120px;}",
+    "    button:hover { background: var(--tertiary-color); }",
+    "    #toggleBtn { position: fixed; top: 45px; left: 12px; z-index: 1100; background: var(--primary-color); color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }",
+    "    #toggleBtn:hover { background: var(--tertiary-color); }",
     "    body.sidebar-open #toggleBtn { left: calc(var(--sidebar-w) + 12px); }",
     "    td:first-child { width: 20%; text-align: center; }",
     "    td:nth-child(2) { width: 40%; }",
@@ -399,4 +399,3 @@ try:
     webbrowser.open(f"file://{OUTPUT_HTML.resolve()}")
 except Exception as e:
     print(f"Could not open browser automatically: {e}")
-Ma
