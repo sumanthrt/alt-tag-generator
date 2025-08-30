@@ -17,7 +17,7 @@ from contextlib import nullcontext
 # CONFIG (tune these)
 # --------------------------
 MODEL_DIR = "./blip2-opt-2.7b"
-MAX_NEW_TOKENS = 4000
+MAX_NEW_TOKENS = 40
 
 # Keep CPU/Windows behavior identical to before
 BATCH_SIZE_CPU = 2            # CPU batch size (Windows path unchanged)
