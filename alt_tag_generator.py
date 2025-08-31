@@ -19,15 +19,13 @@ from contextlib import nullcontext
 MODEL_DIR = "./blip2-opt-2.7b"
 MAX_NEW_TOKENS = 40
 
-# Keep CPU/Windows behavior identical to before
-BATCH_SIZE_CPU = 2            # CPU batch size (Windows path unchanged)
-NUM_WORKERS = 4               # threads for PIL load/resize
-TARGET_THUMB = (480, 480)     # quick pre-resize; HF processor still resizes appropriately
-SET_TORCH_THREADS = True      # CPU-only tuning
+BATCH_SIZE_CPU = 2
+NUM_WORKERS = 4
+TARGET_THUMB = (480, 480)
+SET_TORCH_THREADS = True
 
-# macOS (Apple Silicon) tunables
 USE_MPS_IF_AVAILABLE = True
-BATCH_SIZE_MAC = 2            # try 3–4 if VRAM allows; start with 2 for safety
+BATCH_SIZE_MAC = 2
 
 # --------------------------
 # USER INPUT
@@ -52,11 +50,10 @@ use_mps = (is_mac and USE_MPS_IF_AVAILABLE and torch.backends.mps.is_available()
 
 if use_mps:
     device = "mps"
-    dtype = torch.float16          # fp16 weights on MPS for speed
+    dtype = torch.float16
     eff_batch_size = BATCH_SIZE_MAC
     print("🚀 Using Apple Silicon MPS (fp16)")
 else:
-    # Preserve CPU-only behavior (even if CUDA is present)
     if torch.cuda.is_available() or torch.backends.mps.is_available():
         print("⚠️ Accelerators detected, but using CPU path for parity.")
     device = "cpu"
@@ -64,7 +61,6 @@ else:
     eff_batch_size = BATCH_SIZE_CPU
     print("🧠 Using CPU")
 
-# CPU thread tuning (unchanged)
 if device == "cpu" and SET_TORCH_THREADS:
     try:
         cores = os.cpu_count() or 4
@@ -82,7 +78,7 @@ print("Loading BLIP2 (OPT-2.7B) from local folder...")
 processor = Blip2Processor.from_pretrained(MODEL_DIR)
 model = Blip2ForConditionalGeneration.from_pretrained(
     MODEL_DIR,
-    torch_dtype=dtype,   # fp16 on MPS, fp32 on CPU
+    torch_dtype=dtype,
     device_map=None
 ).to(device)
 model.eval()
@@ -149,18 +145,15 @@ end_pre = time.time()
 print(f"Preprocess time: {end_pre - start_pre:.2f}s\n")
 
 # --------------------------
-# GENERATE ALT TAGS (BATCHED)
+# GENERATE ALT TAGS
 # --------------------------
 results_by_folder = {}
 start_time = time.time()
 
-# Autocast:
-# - CPU: keep the older API for parity with your fast path
-# - MPS: disable autocast (already running fp16 end-to-end)
 if device == "cpu":
-    autocast_ctx = torch.cpu.amp.autocast(dtype=torch.bfloat16)  # may show FutureWarning; safe
+    autocast_ctx = torch.cpu.amp.autocast(dtype=torch.bfloat16)
 else:
-    autocast_ctx = nullcontext()  # MPS path
+    autocast_ctx = nullcontext()
 
 with torch.inference_mode():
     for folder, files in images_by_folder.items():
@@ -182,12 +175,10 @@ with torch.inference_mode():
 
                 inputs = processor(images=pil_batch, return_tensors="pt")
 
-                # CPU-only optimization: channels_last helps oneDNN
                 if device == "cpu":
                     pixel_values = inputs["pixel_values"].to(device)
                     pixel_values = pixel_values.to(memory_format=torch.channels_last).contiguous()
                 else:
-                    # MPS: move as fp16 to avoid casts
                     pixel_values = inputs["pixel_values"].to(device, dtype=torch.float16)
 
                 inputs["pixel_values"] = pixel_values
@@ -201,7 +192,6 @@ with torch.inference_mode():
                     )
                 t1 = time.time()
 
-                # Decode per item
                 for j, p in enumerate(batch_paths):
                     try:
                         caption = processor.decode(out[j], skip_special_tokens=True).strip()
@@ -217,7 +207,6 @@ with torch.inference_mode():
                            f"{', '.join(bp.name for bp in batch_paths)} in {t1 - t0:.2f}s")
                 pbar.update(1)
 
-                # Optional: trim MPS cache occasionally on long runs
                 if device == "mps" and ((bstart // eff_batch_size) % 8 == 0):
                     try:
                         torch.mps.empty_cache()
@@ -242,7 +231,7 @@ html_lines = [
     "  <meta charset='UTF-8'>",
     f"  <title>Alt Tags for {esc(hotel_name)}</title>",
     "  <style>",
-    "    :root { --sidebar-w: 220px; --gap: 20px; --primary-color: #27ae60; --secondary-color): #145a32; --tertiary-color: #1e8449; }",
+    "    :root { --sidebar-w: 220px; --gap: 20px; --primary-color: #27ae60; --secondary-color: #145a32; --tertiary-color: #1e8449; }",
     "    body { font-family: Arial, sans-serif; margin: 0; background: #f9fafc; color: #333; }",
     "    .container { display: flex; }",
     "    .sidebar { position: fixed; top: 0; left: 0; width: var(--sidebar-w); height: 100%; background: var(--secondary-color); color: white; overflow-y: auto; padding: 20px; box-sizing: border-box; transition: transform 0.3s ease; }",
@@ -257,7 +246,7 @@ html_lines = [
     "    table { border-collapse: collapse; width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }",
     "    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: middle; }",
     "    thead th { background-color: var(--primary-color); color: white; position: sticky; top: 0; z-index: 10; }",
-    "    img { width: 250px; height: 180px; object-fit: cover; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }",
+    "    img:not(.lightbox-content) { width: 250px; height: 180px; object-fit: cover; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); cursor: pointer; }",
     "    button { margin-top: 5px; padding: 4px 8px; font-size: 0.85rem; background: var(--primary-color); color: white; border: none; border-radius: 3px; cursor: pointer; min-width: 120px;}",
     "    button:hover { background: var(--tertiary-color); }",
     "    #toggleBtn { position: fixed; top: 45px; left: 12px; z-index: 1100; background: var(--primary-color); color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }",
@@ -267,6 +256,12 @@ html_lines = [
     "    td:nth-child(2) { width: 40%; }",
     "    td:nth-child(3) { width: 40%; }",
     "    @media (max-width: 768px) { body.sidebar-open #toggleBtn { left: 12px; } }",
+    "    /* Lightbox */",
+    "    .lightbox { display: none; position: fixed; z-index: 2000; padding-top: 60px; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.9); }",
+    "    .lightbox-content { margin: auto; display: block; max-width: 90%; max-height: 80vh; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border-radius: 6px; }",
+    "    .lightbox-close { position: absolute; top: 20px; right: 35px; color: #fff; font-size: 40px; font-weight: bold; cursor: pointer; transition: color 0.2s; }",
+    "    .lightbox-close:hover { color: #bbb; }",
+    "    #lightbox-caption { margin: 15px auto; text-align: center; color: #ccc; font-size: 14px; max-width: 80%; }",
     "  </style>",
     "</head>",
     "<body class='sidebar-open'>",
@@ -297,7 +292,7 @@ for folder, results in results_by_folder.items():
         path_attr = esc_attr(rel_path)
 
         html_lines.append("  <tr>")
-        html_lines.append(f"    <td><img src='{escaped_path}' alt='{escaped_alt}'></td>")
+        html_lines.append(f"    <td><img src='{escaped_path}' alt='{escaped_alt}' class='preview-img' data-full='{escaped_path}'></td>")
         html_lines.append(
             "    <td>"
             f"{escaped_path}<br>"
@@ -317,6 +312,16 @@ html_lines.append(f"<p><strong>Total Inference Time:</strong> {total_time:.2f} s
 html_lines.append(f"<p><strong>Average Time per Image:</strong> {avg_time:.2f} seconds</p>")
 html_lines.append("</div></div>")
 
+# Lightbox HTML
+html_lines.append("""
+<div id="lightbox" class="lightbox">
+  <span class="lightbox-close">&times;</span>
+  <img class="lightbox-content" id="lightbox-img">
+  <div id="lightbox-caption"></div>
+</div>
+""")
+
+# Existing JS + Lightbox JS
 html_lines.append("""
 <script>
   const toggleBtn = document.getElementById('toggleBtn');
@@ -345,42 +350,34 @@ html_lines.append("""
   });
 
   updateAria();
-</script>
-""")
 
-html_lines.append("""
-<script>
-  document.addEventListener('click', async (e) => {
-    const btn = e.target.closest('button.copy-btn');
-    if (!btn) return;
+  // Lightbox logic
+  const lightbox = document.getElementById('lightbox');
+  const lightboxImg = document.getElementById('lightbox-img');
+  const lightboxCaption = document.getElementById('lightbox-caption');
+  const closeBtn = document.querySelector('.lightbox-close');
 
-    let toCopy = btn.getAttribute('data-copy') || '';
-
-    if (btn.classList.contains('copy-path')) {
-      const rel = btn.getAttribute('data-rel') || '';
-      const reportDir = new URL('.', window.location.href);
-      const absURL = new URL(rel, reportDir);
-      toCopy = absURL.href;
-      try {
-        let p = decodeURIComponent(absURL.pathname);
-        const isWindows = navigator.platform.toLowerCase().startsWith('win');
-        if (isWindows) {
-          if (p.startsWith('/')) p = p.slice(1);
-          p = p.replace(/\\//g, '\\\\');
-        }
-        toCopy = p;
-      } catch (_) {}
+  document.addEventListener('click', (e) => {
+    const img = e.target.closest('.preview-img');
+    if (img) {
+      lightbox.style.display = 'block';
+      lightboxImg.src = img.getAttribute('data-full');
+      lightboxCaption.textContent = img.alt;
     }
+  });
 
-    const old = btn.textContent;
-    try {
-      await navigator.clipboard.writeText(toCopy);
-      btn.textContent = 'Copied!';
-      setTimeout(() => btn.textContent = old, 900);
-    } catch (err) {
-      btn.textContent = 'Copy failed';
-      setTimeout(() => btn.textContent = old, 1200);
+  closeBtn.addEventListener('click', () => {
+    lightbox.style.display = 'none';
+  });
+
+  window.addEventListener('click', (e) => {
+    if (e.target == lightbox) {
+      lightbox.style.display = 'none';
     }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') lightbox.style.display = 'none';
   });
 </script>
 """)
