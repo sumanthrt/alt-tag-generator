@@ -324,6 +324,68 @@ html_lines.append("""
 # Existing JS + Lightbox JS
 html_lines.append("""
 <script>
+  // ---------- UI helpers ----------
+  function showTempFeedback(btn, text = "Copied!", ms = 1400) {
+    if (!btn) return;
+    const orig = btn.dataset.origLabel ?? btn.textContent;
+    if (!btn.dataset.origLabel) btn.dataset.origLabel = orig;
+    btn.textContent = text;
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = btn.dataset.origLabel;
+      btn.disabled = false;
+    }, ms);
+  }
+
+  function fallbackCopyTextToClipboard(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // keep off-screen
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (e) {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  async function copyText(text, btn) {
+    if (!text) return false;
+    // prefer navigator.clipboard
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (err) {
+      // fall through to fallback
+    }
+    return fallbackCopyTextToClipboard(text);
+  }
+
+  // make sure there's an aria-live region to announce success to assistive tech
+  (function ensureLiveRegion() {
+    if (document.getElementById("__copy_live_region")) return;
+    const r = document.createElement("div");
+    r.id = "__copy_live_region";
+    r.setAttribute("aria-live", "polite");
+    r.setAttribute("aria-atomic", "true");
+    r.style.position = "absolute";
+    r.style.left = "-9999px";
+    r.style.width = "1px";
+    r.style.height = "1px";
+    r.style.overflow = "hidden";
+    document.body.appendChild(r);
+  })();
+
+  // ---------- Existing UI: sidebar + lightbox handlers ----------
   const toggleBtn = document.getElementById('toggleBtn');
   const sidebar = document.getElementById('sidebar');
   const content = document.getElementById('content');
@@ -351,7 +413,7 @@ html_lines.append("""
 
   updateAria();
 
-  // Lightbox logic
+  // Lightbox logic (unchanged)
   const lightbox = document.getElementById('lightbox');
   const lightboxImg = document.getElementById('lightbox-img');
   const lightboxCaption = document.getElementById('lightbox-caption');
@@ -378,6 +440,41 @@ html_lines.append("""
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') lightbox.style.display = 'none';
+  });
+
+  // ---------- COPY BUTTON HANDLER (delegated) ----------
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('.copy-btn');
+    if (!btn) return;
+    ev.preventDefault();
+
+    // data-copy is primary; fallback to data-rel if present.
+    // use getAttribute to be robust in case dataset normalization was different.
+    let text = btn.getAttribute('data-copy');
+    if (!text || text.trim() === "") {
+      text = btn.getAttribute('data-rel') || "";
+    }
+
+    // sometimes you might be copying visible displayed path (innerText) instead
+    if (!text && btn.closest('tr')) {
+      const tdPath = btn.closest('tr').querySelector('td:nth-child(2)');
+      if (tdPath) text = tdPath.textContent.trim();
+    }
+
+    if (!text) {
+      showTempFeedback(btn, "Nothing to copy", 1000);
+      return;
+    }
+
+    const ok = await copyText(text, btn).catch(() => false);
+    const live = document.getElementById("__copy_live_region");
+    if (ok) {
+      showTempFeedback(btn, "Copied!");
+      if (live) live.textContent = "Copied to clipboard";
+    } else {
+      showTempFeedback(btn, "Copy failed");
+      if (live) live.textContent = "Copy to clipboard failed";
+    }
   });
 </script>
 """)
